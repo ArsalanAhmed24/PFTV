@@ -216,7 +216,7 @@ class MainActivity : AppCompatActivity() {
         fullscreenContainer.removeView(customView)
         customView = null
         webView.visibility = View.VISIBLE
-        customViewCallback?.onHideCustomView()
+        customViewCallback?.onCustomViewHidden()
         customViewCallback = null
         enableImmersiveFullscreen()
     }

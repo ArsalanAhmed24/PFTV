@@ -43,12 +43,11 @@ class MainActivity : AppCompatActivity() {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.mediaPlaybackRequiresUserGesture = false
-        settings.setSupportMultipleWindows(false) // Blocks pop-up windows
+        settings.setSupportMultipleWindows(false)
         settings.javaScriptCanOpenWindowsAutomatically = false
         settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
         webView.webViewClient = object : WebViewClient() {
-            // Intercept network requests and drop ad domains
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?
@@ -60,20 +59,17 @@ class MainActivity : AppCompatActivity() {
                 return super.shouldInterceptRequest(view, request)
             }
 
-            // Prevent redirects to external ad sites
             override fun shouldOverrideUrlLoading(
                 view: WebView?,
                 request: WebResourceRequest?
             ): Boolean {
                 val host = request?.url?.host?.lowercase() ?: ""
-                
                 if (blockedHosts.any { host.contains(it) }) {
-                    return true // Block navigation
+                    return true
                 }
                 return false
             }
 
-            // Inject CSS to hide leftover empty ad containers
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 val hideAdsJs = """
@@ -87,7 +83,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Handle HTML5 Fullscreen Video Playback on TV
         webView.webChromeClient = object : WebChromeClient() {
             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
                 if (customView != null) {
@@ -101,20 +96,24 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onHideCustomView() {
-                if (customView == null) return
-                fullscreenContainer.removeView(customView)
-                customView = null
-                webView.visibility = View.VISIBLE
-                customViewCallback?.onHideCustomView()
+                exitFullscreen()
             }
         }
     }
 
-    // Handle Android TV Remote Back Button
+    private fun exitFullscreen() {
+        if (customView == null) return
+        fullscreenContainer.removeView(customView)
+        customView = null
+        webView.visibility = View.VISIBLE
+        customViewCallback?.onCustomViewHidden()
+        customViewCallback = null
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             if (customView != null) {
-                webView.webChromeClient?.onHideCustomView()
+                exitFullscreen()
                 return true
             }
             if (webView.canGoBack()) {

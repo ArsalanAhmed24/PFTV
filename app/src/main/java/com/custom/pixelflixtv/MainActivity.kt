@@ -31,6 +31,7 @@ import java.io.ByteArrayInputStream
 
 class MainActivity : AppCompatActivity() {
 
+    private lateinit var rootLayout: FrameLayout
     private lateinit var webView: WebView
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
@@ -39,14 +40,12 @@ class MainActivity : AppCompatActivity() {
     private var cursorView: View? = null
     private var isTvDevice = false
 
-    // TV Virtual Mouse Cursor state
     private var cursorActive = false
     private var cursorX = 960f
     private var cursorY = 540f
-    private var moveStep = 18f
+    private var moveStep = 28f
     private var lastMoveTime = 0L
 
-    // TV Remote trigger state (Double-tap Back & Long-press OK)
     private var lastBackPressTime = 0L
     private var okLongPressHandled = false
     private val handler = Handler(Looper.getMainLooper())
@@ -55,13 +54,17 @@ class MainActivity : AppCompatActivity() {
         toggleCursor()
     }
 
-    // Streaming ad & pop-under domains (applied on TV)
-    private val adDomains = setOf(
-        "doubleclick.net", "googlesyndication.com", "googleadservices.com",
-        "adnxs.com", "popads.net", "popcash.net", "propellerads.com",
-        "exoclick.com", "juicyads.com", "trafficjunky.net", "adsterra.com",
-        "highperformanceformat.com", "onclickalgo.com", "mc.yandex.ru",
-        "histats.com", "acscdn.com", "amung.us", "adtng.com"
+    private val adKeywords = listOf(
+        "doubleclick", "googlesyndication", "googleadservices", "adnxs",
+        "popads", "popcash", "propellerads", "exoclick", "juicyads",
+        "trafficjunky", "adsterra", "highperformanceformat", "onclickalgo",
+        "mc.yandex", "histats", "acscdn", "amung.us", "adtng", "ad-maven",
+        "admaven", "hilltopads", "clickadu", "pushground", "richpush",
+        "evadav", "galaksion", "monetag", "usrpub", "clksite", "onclkds",
+        "realwap", "tsyndicate", "realsrv", "bidgear", "mgid", "taboola",
+        "outbrain", "revcontent", "criteo", "pubmatic", "rubiconproject",
+        "openx", "smartadserver", "yandex", "scorecardresearch", "bet365",
+        "1xbet", "mostbet", "parimatch", "melbet", "casino", "banner", "popunder"
     )
 
     private fun detectAndroidTv(): Boolean {
@@ -70,7 +73,15 @@ class MainActivity : AppCompatActivity() {
         val hasLeanback = packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
         val hasTvFeature = packageManager.hasSystemFeature("com.google.android.tv")
         val noTouchscreen = !packageManager.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN)
-        return isTvMode || hasLeanback || hasTvFeature || noTouchscreen
+        val isLargeLandscape = resources.configuration.screenWidthDp >= 960 &&
+            resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        return isTvMode || hasLeanback || hasTvFeature || noTouchscreen || isLargeLandscape
+    }
+
+    private fun isAdUrl(urlString: String?): Boolean {
+        if (urlString.isNullOrBlank()) return false
+        val lower = urlString.lowercase()
+        return adKeywords.any { lower.contains(it) }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -79,11 +90,10 @@ class MainActivity : AppCompatActivity() {
 
         isTvDevice = detectAndroidTv()
 
-        // Enable true edge-to-edge fullscreen on both Mobile and TV
         WindowCompat.setDecorFitsSystemWindows(window, false)
         hideSystemBars()
 
-        val rootLayout = FrameLayout(this).apply {
+        rootLayout = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -108,6 +118,7 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.BLACK)
             isFocusable = true
             isFocusableInTouchMode = true
+            isVerticalScrollBarEnabled = true
 
             settings.apply {
                 javaScriptEnabled = true
@@ -116,19 +127,12 @@ class MainActivity : AppCompatActivity() {
                 mediaPlaybackRequiresUserGesture = false
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
 
-                // Block pop-up windows on both Mobile and TV
                 setSupportMultipleWindows(false)
                 javaScriptCanOpenWindowsAutomatically = false
 
-                // TV-only: force Mobile User-Agent & disable wide-viewport desktop ads
-                if (isTvDevice) {
-                    userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/AP2A.240805.005; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.127 Mobile Safari/537.36"
-                    useWideViewPort = false
-                    loadWithOverviewMode = true
-                } else {
-                    useWideViewPort = true
-                    loadWithOverviewMode = true
-                }
+                userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/AP2A.240805.005; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.127 Mobile Safari/537.36"
+                useWideViewPort = !isTvDevice
+                loadWithOverviewMode = true
             }
 
             webChromeClient = object : WebChromeClient() {
@@ -168,12 +172,8 @@ class MainActivity : AppCompatActivity() {
                     view: WebView?,
                     request: WebResourceRequest?
                 ): WebResourceResponse? {
-                    if (isTvDevice) {
-                        val host = request?.url?.host?.lowercase()
-                            ?: return super.shouldInterceptRequest(view, request)
-                        if (adDomains.any { host == it || host.endsWith(".$it") }) {
-                            return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
-                        }
+                    if (isTvDevice && isAdUrl(request?.url?.toString())) {
+                        return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
                     }
                     return super.shouldInterceptRequest(view, request)
                 }
@@ -182,39 +182,23 @@ class MainActivity : AppCompatActivity() {
                     view: WebView?,
                     request: WebResourceRequest?
                 ): Boolean {
-                    val host = request?.url?.host?.lowercase() ?: ""
-                    if (adDomains.any { host == it || host.endsWith(".$it") }) {
-                        return true
+                    val urlStr = request?.url?.toString() ?: return false
+                    if (isAdUrl(urlStr)) return true
+                    if (isTvDevice && request.isForMainFrame) {
+                        val host = request.url?.host?.lowercase() ?: ""
+                        if (!host.contains("pixelflix")) return true
                     }
                     return false
                 }
 
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    if (isTvDevice) injectTvAdShield(view)
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    if (isTvDevice) {
-                        val adCleanJs = """
-                            (function() {
-                                const style = document.createElement('style');
-                                style.innerHTML = `
-                                    iframe[src*="ads"], iframe[src*="pop"], div[id*="ad-"], div[class*="ad-"],
-                                    div[class*="popup"], div[class*="banner"], a[target="_blank"][style*="fixed"],
-                                    div[style*="z-index: 2147483647"], div[style*="z-index: 999999"] {
-                                        display: none !important;
-                                        visibility: hidden !important;
-                                        pointer-events: none !important;
-                                    }
-                                `;
-                                document.head.appendChild(style);
-
-                                setInterval(() => {
-                                    document.querySelectorAll('a[target="_blank"]').forEach(el => {
-                                        if (!el.href.includes('pixelflix')) el.remove();
-                                    });
-                                }, 1500);
-                            })();
-                        """.trimIndent()
-                        view?.evaluateJavascript(adCleanJs, null)
-                    }
+                    if (isTvDevice) injectTvAdShield(view)
                 }
             }
         }
@@ -222,37 +206,113 @@ class MainActivity : AppCompatActivity() {
         rootLayout.addView(webView)
         rootLayout.addView(fullscreenContainer)
 
-        // Only attach the virtual mouse cursor when running on a TV / TV box
         if (isTvDevice) {
-            val cursorSize = 28
-            val cursor = View(this).apply {
-                layoutParams = FrameLayout.LayoutParams(cursorSize, cursorSize)
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(Color.parseColor("#FF6D00"))
-                    setStroke(3, Color.WHITE)
-                }
-                elevation = 20f
-                visibility = View.GONE
-            }
-            cursorView = cursor
-            rootLayout.addView(cursor)
-
-            rootLayout.post {
-                cursorX = rootLayout.width / 2f
-                cursorY = rootLayout.height / 2f
-                updateCursorPosition()
-            }
+            ensureCursorAttached()
         }
 
         setContentView(rootLayout)
         webView.loadUrl("https://pixelflix.cc")
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // On phones/tablets, keep your exact original Back and touch behavior untouched
+    private fun ensureCursorAttached() {
+        if (cursorView != null) return
+        val cursorSize = 32
+        val cursor = View(this).apply {
+            layoutParams = FrameLayout.LayoutParams(cursorSize, cursorSize)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#FF6D00"))
+                setStroke(3, Color.WHITE)
+            }
+            elevation = 30f
+            visibility = View.GONE
+        }
+        cursorView = cursor
+        rootLayout.addView(cursor)
+
+        rootLayout.post {
+            if (rootLayout.width > 0 && rootLayout.height > 0) {
+                cursorX = rootLayout.width / 2f
+                cursorY = rootLayout.height / 2f
+                updateCursorPosition()
+            }
+        }
+    }
+
+    private fun activateTvModeIfNeeded() {
         if (!isTvDevice) {
-            if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_DOWN) {
+            isTvDevice = true
+            webView.settings.useWideViewPort = false
+            ensureCursorAttached()
+            injectTvAdShield(webView)
+        } else {
+            ensureCursorAttached()
+        }
+    }
+
+    private fun injectTvAdShield(view: WebView?) {
+        val adCleanJs = """
+            (function() {
+                if (window.__pfTvShieldInstalled) return;
+                window.__pfTvShieldInstalled = true;
+
+                try {
+                    Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5 });
+                    window.ontouchstart = window.ontouchstart || null;
+                } catch (e) {}
+
+                window.open = function() { return null; };
+
+                const style = document.createElement('style');
+                style.innerHTML = `
+                    iframe[src*="ads"], iframe[src*="pop"], iframe[src*="banner"],
+                    ins.adsbygoogle, [id^="ad_"], [id*="-ad-"], [class*="ad-banner"],
+                    [class*="popup"], [class*="overlay-ad"], a[target="_blank"][style*="fixed"],
+                    div[style*="z-index: 2147483647"], div[style*="z-index: 999999"],
+                    div[style*="z-index:999999"], div[style*="position: fixed"][style*="bottom: 0"] {
+                        display: none !important;
+                        visibility: hidden !important;
+                        height: 0 !important;
+                        pointer-events: none !important;
+                    }
+                `;
+                (document.head || document.documentElement).appendChild(style);
+
+                setInterval(() => {
+                    document.querySelectorAll('a[target="_blank"]').forEach(el => {
+                        if (el.href && !el.href.includes('pixelflix')) el.remove();
+                    });
+                    document.querySelectorAll('div, ins').forEach(el => {
+                        const cs = window.getComputedStyle(el);
+                        if ((cs.position === 'fixed' || cs.position === 'absolute') && parseInt(cs.zIndex, 10) > 9000) {
+                            if (!el.querySelector('video') && !el.closest('video')) el.remove();
+                        }
+                    });
+                }, 1000);
+            })();
+        """.trimIndent()
+        view?.evaluateJavascript(adCleanJs, null)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val keyCode = event.keyCode
+        val action = event.action
+
+        // Only activate TV mode when remote/D-pad keys are used so mobile touch stays untouched
+        val isRemoteKey = keyCode == KeyEvent.KEYCODE_DPAD_UP ||
+            keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+            keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+            keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ||
+            keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+            keyCode == KeyEvent.KEYCODE_MENU ||
+            keyCode == KeyEvent.KEYCODE_INFO
+
+        if (isRemoteKey) {
+            activateTvModeIfNeeded()
+        }
+
+        if (!isTvDevice) {
+            if (keyCode == KeyEvent.KEYCODE_BACK && action == KeyEvent.ACTION_DOWN) {
                 if (customView != null) {
                     webView.webChromeClient?.onHideCustomView()
                     return true
@@ -265,44 +325,41 @@ class MainActivity : AppCompatActivity() {
             return super.dispatchKeyEvent(event)
         }
 
-        val keyCode = event.keyCode
-
-        // 1. TV: Toggle cursor via Menu (≡) or Info button
         if (keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_INFO) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            if (action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                 toggleCursor()
             }
             return true
         }
 
-        // 2. TV: Toggle cursor via Long-Press Center OK (600ms) OR click when cursor is active
         if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
-            if (event.action == KeyEvent.ACTION_DOWN) {
+            if (action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) {
                     okLongPressHandled = false
                     handler.postDelayed(okLongPressRunnable, 600L)
                 }
                 return true
-            } else if (event.action == KeyEvent.ACTION_UP) {
+            } else if (action == KeyEvent.ACTION_UP) {
                 handler.removeCallbacks(okLongPressRunnable)
                 if (!okLongPressHandled) {
                     if (cursorActive) {
-                        simulateTap(cursorX, cursorY)
-                        return true
+                        val centerX = cursorX + ((cursorView?.width ?: 32) / 2f)
+                        val centerY = cursorY + ((cursorView?.height ?: 32) / 2f)
+                        simulateTap(centerX, centerY)
                     } else {
-                        return super.dispatchKeyEvent(event)
+                        performFocusedElementClick()
                     }
                 }
                 return true
             }
         }
 
-        // 3. TV: Double-tap Back (←) within 450ms to toggle cursor; single-tap exits fullscreen or goes back
         if (keyCode == KeyEvent.KEYCODE_BACK) {
-            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            if (action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                 val now = SystemClock.uptimeMillis()
                 if (now - lastBackPressTime < 450L) {
                     lastBackPressTime = 0L
+                    activateTvModeIfNeeded()
                     toggleCursor()
                     return true
                 }
@@ -322,15 +379,21 @@ class MainActivity : AppCompatActivity() {
             return super.dispatchKeyEvent(event)
         }
 
-        // 4. TV: Move cursor with D-pad arrows when active
-        if (cursorActive) {
-            when (keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP,
-                KeyEvent.KEYCODE_DPAD_DOWN,
-                KeyEvent.KEYCODE_DPAD_LEFT,
-                KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                    if (event.action == KeyEvent.ACTION_DOWN) {
-                        moveCursor(keyCode)
+        if (keyCode == KeyEvent.KEYCODE_DPAD_UP ||
+            keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+            keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+            keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+        ) {
+            if (cursorActive) {
+                if (action == KeyEvent.ACTION_DOWN) {
+                    moveCursor(keyCode)
+                }
+                return true
+            } else if (customView == null) {
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                    if (action == KeyEvent.ACTION_DOWN) {
+                        val scrollDir = if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) 300 else -300
+                        scrollPage(scrollDir)
                     }
                     return true
                 }
@@ -340,7 +403,51 @@ class MainActivity : AppCompatActivity() {
         return super.dispatchKeyEvent(event)
     }
 
+    private fun performFocusedElementClick() {
+        val clickJs = """
+            (function() {
+                const el = document.activeElement;
+                if (el && el !== document.body && el !== document.documentElement) {
+                    el.click();
+                    return true;
+                }
+                return false;
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(clickJs) { result ->
+            if (result != "true") {
+                val centerX = webView.width / 2f
+                val centerY = webView.height / 2f
+                simulateTap(centerX, centerY)
+            }
+        }
+    }
+
+    private fun scrollPage(deltaY: Int) {
+        val scrollJs = """
+            (function() {
+                let scrolled = false;
+                const scrollableElements = document.querySelectorAll('div, main, section, .scrollable, #root');
+                scrollableElements.forEach(el => {
+                    if (el.scrollHeight > el.clientHeight + 50) {
+                        const style = window.getComputedStyle(el);
+                        if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+                            el.scrollTop += $deltaY;
+                            scrolled = true;
+                        }
+                    }
+                });
+
+                if (!scrolled) {
+                    window.scrollBy({ top: $deltaY, behavior: 'smooth' });
+                }
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(scrollJs, null)
+    }
+
     private fun toggleCursor() {
+        ensureCursorAttached()
         val cursor = cursorView ?: return
         cursorActive = !cursorActive
         if (cursorActive) {
@@ -357,18 +464,24 @@ class MainActivity : AppCompatActivity() {
         val cursor = cursorView ?: return
         val now = SystemClock.uptimeMillis()
         moveStep = if (now - lastMoveTime < 120L) {
-            (moveStep + 4f).coerceAtMost(48f)
+            (moveStep + 6f).coerceAtMost(60f)
         } else {
-            18f
+            28f
         }
         lastMoveTime = now
 
-        val maxWidth = (webView.width - cursor.width).coerceAtLeast(0).toFloat()
-        val maxHeight = (webView.height - cursor.height).coerceAtLeast(0).toFloat()
+        val maxWidth = (rootLayout.width - cursor.width).coerceAtLeast(0).toFloat()
+        val maxHeight = (rootLayout.height - cursor.height).coerceAtLeast(0).toFloat()
 
         when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> cursorY = (cursorY - moveStep).coerceIn(0f, maxHeight)
-            KeyEvent.KEYCODE_DPAD_DOWN -> cursorY = (cursorY + moveStep).coerceIn(0f, maxHeight)
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                if (cursorY <= 40f) scrollPage(-350)
+                cursorY = (cursorY - moveStep).coerceIn(0f, maxHeight)
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (cursorY >= maxHeight - 40f) scrollPage(350)
+                cursorY = (cursorY + moveStep).coerceIn(0f, maxHeight)
+            }
             KeyEvent.KEYCODE_DPAD_LEFT -> cursorX = (cursorX - moveStep).coerceIn(0f, maxWidth)
             KeyEvent.KEYCODE_DPAD_RIGHT -> cursorX = (cursorX + moveStep).coerceIn(0f, maxWidth)
         }
@@ -382,16 +495,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun simulateTap(x: Float, y: Float) {
-        val cursor = cursorView ?: return
-        val downTime = SystemClock.uptimeMillis()
-        val eventTime = SystemClock.uptimeMillis() + 20
-        val centerX = x + (cursor.width / 2f)
-        val centerY = y + (cursor.height / 2f)
-
-        val downEvent = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, centerX, centerY, 0)
-        val upEvent = MotionEvent.obtain(downTime, eventTime, MotionEvent.ACTION_UP, centerX, centerY, 0)
-
         val targetView: View = if (fullscreenContainer.visibility == View.VISIBLE) fullscreenContainer else webView
+
+        val downTime = SystemClock.uptimeMillis()
+        val downEvent = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0)
+
+        val upTime = SystemClock.uptimeMillis() + 50
+        val upEvent = MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)
+
         targetView.dispatchTouchEvent(downEvent)
         targetView.dispatchTouchEvent(upEvent)
 

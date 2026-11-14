@@ -15,6 +15,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -88,6 +89,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Prevent Android TV / mobile screen from sleeping or entering screensaver during playback
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         isTvDevice = detectAndroidTv()
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -95,6 +99,7 @@ class MainActivity : AppCompatActivity() {
 
         rootLayout = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
+            keepScreenOn = true
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -103,6 +108,7 @@ class MainActivity : AppCompatActivity() {
 
         fullscreenContainer = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
+            keepScreenOn = true
             visibility = View.GONE
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -116,6 +122,7 @@ class MainActivity : AppCompatActivity() {
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
             setBackgroundColor(Color.BLACK)
+            keepScreenOn = true
             isFocusable = true
             isFocusableInTouchMode = true
             isVerticalScrollBarEnabled = true
@@ -152,7 +159,14 @@ class MainActivity : AppCompatActivity() {
                     )
                     fullscreenContainer.visibility = View.VISIBLE
                     webView.visibility = View.GONE
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     hideSystemBars()
+
+                    // Hide cursor automatically upon entering fullscreen so player controls fade out
+                    if (cursorActive) {
+                        setCursorVisibility(false, showToast = false)
+                    }
+                    releasePlayerControlFocus()
                 }
 
                 override fun onHideCustomView() {
@@ -294,11 +308,28 @@ class MainActivity : AppCompatActivity() {
         view?.evaluateJavascript(adCleanJs, null)
     }
 
+    private fun releasePlayerControlFocus() {
+        val blurJs = """
+            (function() {
+                if (document.activeElement && document.activeElement !== document.body) {
+                    document.activeElement.blur();
+                }
+                const video = document.querySelector('video');
+                if (video) {
+                    video.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+                    if (video.parentElement) {
+                        video.parentElement.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+                    }
+                }
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(blurJs, null)
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val keyCode = event.keyCode
         val action = event.action
 
-        // Only activate TV mode when remote/D-pad keys are used so mobile touch stays untouched
         val isRemoteKey = keyCode == KeyEvent.KEYCODE_DPAD_UP ||
             keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
             keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
@@ -346,6 +377,12 @@ class MainActivity : AppCompatActivity() {
                         val centerX = cursorX + ((cursorView?.width ?: 32) / 2f)
                         val centerY = cursorY + ((cursorView?.height ?: 32) / 2f)
                         simulateTap(centerX, centerY)
+                        if (customView != null) {
+                            handler.postDelayed({
+                                setCursorVisibility(false, showToast = false)
+                                releasePlayerControlFocus()
+                            }, 350L)
+                        }
                     } else {
                         performFocusedElementClick()
                     }
@@ -446,18 +483,27 @@ class MainActivity : AppCompatActivity() {
         webView.evaluateJavascript(scrollJs, null)
     }
 
-    private fun toggleCursor() {
+    private fun setCursorVisibility(active: Boolean, showToast: Boolean = true) {
         ensureCursorAttached()
         val cursor = cursorView ?: return
-        cursorActive = !cursorActive
+        cursorActive = active
         if (cursorActive) {
             cursor.visibility = View.VISIBLE
             updateCursorPosition()
-            Toast.makeText(this, "Cursor ON (OK to click, Back to exit)", Toast.LENGTH_SHORT).show()
+            if (showToast) {
+                Toast.makeText(this, "Cursor ON (OK to click, Back to exit)", Toast.LENGTH_SHORT).show()
+            }
         } else {
             cursor.visibility = View.GONE
-            Toast.makeText(this, "Cursor OFF", Toast.LENGTH_SHORT).show()
+            releasePlayerControlFocus()
+            if (showToast) {
+                Toast.makeText(this, "Cursor OFF", Toast.LENGTH_SHORT).show()
+            }
         }
+    }
+
+    private fun toggleCursor() {
+        setCursorVisibility(!cursorActive, showToast = true)
     }
 
     private fun moveCursor(keyCode: Int) {
@@ -518,6 +564,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) hideSystemBars()
+        if (hasFocus) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            hideSystemBars()
+        }
     }
 }

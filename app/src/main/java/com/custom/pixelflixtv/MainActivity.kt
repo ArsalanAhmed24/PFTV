@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -89,9 +90,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Prevent Android TV / mobile screen from sleeping or entering screensaver during playback
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
         isTvDevice = detectAndroidTv()
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -162,11 +161,12 @@ class MainActivity : AppCompatActivity() {
                     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     hideSystemBars()
 
-                    // Hide cursor automatically upon entering fullscreen so player controls fade out
                     if (cursorActive) {
                         setCursorVisibility(false, showToast = false)
                     }
-                    releasePlayerControlFocus()
+                    handler.postDelayed({
+                        clearHoverAndFocusWithoutClicking()
+                    }, 350L)
                 }
 
                 override fun onHideCustomView() {
@@ -186,7 +186,7 @@ class MainActivity : AppCompatActivity() {
                     view: WebView?,
                     request: WebResourceRequest?
                 ): WebResourceResponse? {
-                    if (isTvDevice && isAdUrl(request?.url?.toString())) {
+                    if (isAdUrl(request?.url?.toString())) {
                         return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
                     }
                     return super.shouldInterceptRequest(view, request)
@@ -198,7 +198,7 @@ class MainActivity : AppCompatActivity() {
                 ): Boolean {
                     val urlStr = request?.url?.toString() ?: return false
                     if (isAdUrl(urlStr)) return true
-                    if (isTvDevice && request.isForMainFrame) {
+                    if (request.isForMainFrame) {
                         val host = request.url?.host?.lowercase() ?: ""
                         if (!host.contains("pixelflix")) return true
                     }
@@ -207,12 +207,14 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                     super.onPageStarted(view, url, favicon)
-                    if (isTvDevice) injectTvAdShield(view)
+                    injectAdShield(view)
+                    if (isTvDevice) injectTvHelpers(view)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    if (isTvDevice) injectTvAdShield(view)
+                    injectAdShield(view)
+                    if (isTvDevice) injectTvHelpers(view)
                 }
             }
         }
@@ -258,22 +260,17 @@ class MainActivity : AppCompatActivity() {
             isTvDevice = true
             webView.settings.useWideViewPort = false
             ensureCursorAttached()
-            injectTvAdShield(webView)
+            injectTvHelpers(webView)
         } else {
             ensureCursorAttached()
         }
     }
 
-    private fun injectTvAdShield(view: WebView?) {
-        val adCleanJs = """
+    private fun injectAdShield(view: WebView?) {
+        val adJs = """
             (function() {
-                if (window.__pfTvShieldInstalled) return;
-                window.__pfTvShieldInstalled = true;
-
-                try {
-                    Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5 });
-                    window.ontouchstart = window.ontouchstart || null;
-                } catch (e) {}
+                if (window.__pfAdShieldInstalled) return;
+                window.__pfAdShieldInstalled = true;
 
                 window.open = function() { return null; };
 
@@ -305,25 +302,278 @@ class MainActivity : AppCompatActivity() {
                 }, 1000);
             })();
         """.trimIndent()
-        view?.evaluateJavascript(adCleanJs, null)
+        view?.evaluateJavascript(adJs, null)
     }
 
-    private fun releasePlayerControlFocus() {
-        val blurJs = """
+    private fun injectTvHelpers(view: WebView?) {
+        val tvJs = """
             (function() {
-                if (document.activeElement && document.activeElement !== document.body) {
-                    document.activeElement.blur();
-                }
-                const video = document.querySelector('video');
-                if (video) {
-                    video.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
-                    if (video.parentElement) {
-                        video.parentElement.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+                if (window.__pfTvHelpersInstalled) return;
+                window.__pfTvHelpersInstalled = true;
+
+                try {
+                    Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5 });
+                    window.ontouchstart = window.ontouchstart || null;
+                } catch (e) {}
+
+                const style = document.createElement('style');
+                style.innerHTML = `
+                    .__pf-tv-focus {
+                        outline: 3px solid #FF6D00 !important;
+                        outline-offset: 3px !important;
+                        box-shadow: 0 0 14px rgba(255, 109, 0, 0.85) !important;
+                        border-radius: 6px !important;
+                        transition: transform 0.12s ease !important;
                     }
+                    .__pf-hud-idle-hidden {
+                        opacity: 0 !important;
+                        transition: opacity 0.4s ease !important;
+                    }
+                `;
+                (document.head || document.documentElement).appendChild(style);
+
+                // Spatial D-pad focus engine for cursor-free remote navigation
+                window.__pfCurrentFocus = null;
+
+                function getFocusables() {
+                    const selectors = 'a[href], button, input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"]), [onclick]';
+                    const raw = Array.from(document.querySelectorAll(selectors));
+                    return raw.filter(el => {
+                        if (el.disabled || el.getAttribute('aria-hidden') === 'true') return false;
+                        const cs = window.getComputedStyle(el);
+                        if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return false;
+                        const r = el.getBoundingClientRect();
+                        return r.width >= 16 && r.height >= 16;
+                    });
                 }
+
+                window.__pfSetFocus = function(el) {
+                    if (window.__pfCurrentFocus) {
+                        window.__pfCurrentFocus.classList.remove('__pf-tv-focus');
+                    }
+                    window.__pfCurrentFocus = el;
+                    if (el) {
+                        el.classList.add('__pf-tv-focus');
+                        try { el.focus({ preventScroll: true }); } catch (e) {}
+                        el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+                    }
+                };
+
+                window.__pfClearFocus = function() {
+                    if (window.__pfCurrentFocus) {
+                        window.__pfCurrentFocus.classList.remove('__pf-tv-focus');
+                        window.__pfCurrentFocus = null;
+                    }
+                };
+
+                window.__pfScrollSmart = function(deltaY) {
+                    let scrolled = false;
+                    document.querySelectorAll('div, main, section, .scrollable, #root').forEach(el => {
+                        if (el.scrollHeight > el.clientHeight + 40) {
+                            const cs = window.getComputedStyle(el);
+                            if (cs.overflowY === 'auto' || cs.overflowY === 'scroll') {
+                                const before = el.scrollTop;
+                                el.scrollTop += deltaY;
+                                if (el.scrollTop !== before) scrolled = true;
+                            }
+                        }
+                    });
+                    if (!scrolled) {
+                        window.scrollBy({ top: deltaY, behavior: 'smooth' });
+                    }
+                };
+
+                window.__pfMoveSpatialFocus = function(dir) {
+                    const list = getFocusables();
+                    if (!list.length) {
+                        if (dir === 'DOWN') window.__pfScrollSmart(320);
+                        if (dir === 'UP') window.__pfScrollSmart(-320);
+                        return;
+                    }
+
+                    let curr = window.__pfCurrentFocus;
+                    if (!curr || !document.body.contains(curr)) {
+                        const visible = list.find(el => {
+                            const r = el.getBoundingClientRect();
+                            return r.top >= 0 && r.bottom <= window.innerHeight;
+                        }) || list[0];
+                        window.__pfSetFocus(visible);
+                        return;
+                    }
+
+                    const cRect = curr.getBoundingClientRect();
+                    const cx = cRect.left + cRect.width / 2;
+                    const cy = cRect.top + cRect.height / 2;
+
+                    let best = null;
+                    let bestScore = Infinity;
+
+                    for (const el of list) {
+                        if (el === curr) continue;
+                        const r = el.getBoundingClientRect();
+                        const ex = r.left + r.width / 2;
+                        const ey = r.top + r.height / 2;
+                        const dx = ex - cx;
+                        const dy = ey - cy;
+
+                        let valid = false;
+                        let primary = 0;
+                        let secondary = 0;
+
+                        if (dir === 'RIGHT' && dx > 10 && Math.abs(dy) < Math.max(cRect.height * 1.4, 90)) {
+                            valid = true; primary = dx; secondary = Math.abs(dy) * 2.5;
+                        } else if (dir === 'LEFT' && dx < -10 && Math.abs(dy) < Math.max(cRect.height * 1.4, 90)) {
+                            valid = true; primary = -dx; secondary = Math.abs(dy) * 2.5;
+                        } else if (dir === 'DOWN' && dy > 10) {
+                            valid = true; primary = dy; secondary = Math.abs(dx) * 1.5;
+                        } else if (dir === 'UP' && dy < -10) {
+                            valid = true; primary = -dy; secondary = Math.abs(dx) * 1.5;
+                        }
+
+                        if (valid) {
+                            const score = primary + secondary;
+                            if (score < bestScore) {
+                                bestScore = score;
+                                best = el;
+                            }
+                        }
+                    }
+
+                    if (best) {
+                        window.__pfSetFocus(best);
+                    } else if (dir === 'DOWN') {
+                        window.__pfScrollSmart(350);
+                    } else if (dir === 'UP') {
+                        window.__pfScrollSmart(-350);
+                    }
+                };
+
+                window.__pfClickFocused = function() {
+                    const el = window.__pfCurrentFocus || document.activeElement;
+                    if (el && el !== document.body && el !== document.documentElement) {
+                        el.click();
+                        return true;
+                    }
+                    return false;
+                };
             })();
         """.trimIndent()
-        webView.evaluateJavascript(blurJs, null)
+        view?.evaluateJavascript(tvJs, null)
+    }
+
+    private fun clearHoverAndFocusWithoutClicking() {
+        val targetView: View = if (fullscreenContainer.visibility == View.VISIBLE) fullscreenContainer else webView
+        val now = SystemClock.uptimeMillis()
+
+        val hoverExit = MotionEvent.obtain(now, now, MotionEvent.ACTION_HOVER_EXIT, 0f, 0f, 0).apply {
+            source = InputDevice.SOURCE_MOUSE
+        }
+        targetView.dispatchGenericMotionEvent(hoverExit)
+        hoverExit.recycle()
+
+        val js = """
+            (function() {
+                if (window.__pfClearFocus) window.__pfClearFocus();
+                function cleanDoc(doc) {
+                    try {
+                        if (doc.activeElement && doc.activeElement !== doc.body) {
+                            doc.activeElement.blur();
+                        }
+                        doc.querySelectorAll('button, [tabindex], a, input').forEach(el => {
+                            try { el.blur(); } catch (e) {}
+                        });
+                        doc.querySelectorAll('video, [class*="player"], [class*="control"], [class*="overlay"], [id*="player"]').forEach(el => {
+                            ['mouseleave', 'mouseout', 'pointerleave', 'pointerout'].forEach(evt => {
+                                el.dispatchEvent(new MouseEvent(evt, { bubbles: true }));
+                                if (window.PointerEvent) {
+                                    el.dispatchEvent(new PointerEvent(evt, { bubbles: true }));
+                                }
+                            });
+                        });
+
+                        const video = doc.querySelector('video');
+                        if (video && !doc.__pfIdleWatcherInstalled) {
+                            doc.__pfIdleWatcherInstalled = true;
+                            let idleTimer = null;
+
+                            const hideOverlays = () => {
+                                if (video.paused || window.__pfCursorIsOn) return;
+                                const vRect = video.getBoundingClientRect();
+                                if (vRect.width < 300) return;
+                                doc.querySelectorAll('div, header, footer, nav').forEach(el => {
+                                    if (el === video || el.contains(video)) return;
+                                    const cs = window.getComputedStyle(el);
+                                    const r = el.getBoundingClientRect();
+                                    const isOverlay = (cs.position === 'absolute' || cs.position === 'fixed') &&
+                                        r.width > vRect.width * 0.5 && r.height > 24 && r.height < vRect.height * 0.45;
+                                    if (isOverlay) {
+                                        el.classList.add('__pf-hud-idle-hidden');
+                                    }
+                                });
+                            };
+
+                            const showOverlays = () => {
+                                doc.querySelectorAll('.__pf-hud-idle-hidden').forEach(el => {
+                                    el.classList.remove('__pf-hud-idle-hidden');
+                                });
+                                clearTimeout(idleTimer);
+                                idleTimer = setTimeout(hideOverlays, 3500);
+                            };
+
+                            window.__pfShowPlayerHud = showOverlays;
+                            window.__pfHidePlayerHud = hideOverlays;
+
+                            ['pointerdown', 'keydown', 'touchstart'].forEach(ev => {
+                                doc.addEventListener(ev, showOverlays, true);
+                            });
+                            video.addEventListener('pause', showOverlays);
+                            video.addEventListener('play', () => {
+                                clearTimeout(idleTimer);
+                                idleTimer = setTimeout(hideOverlays, 3500);
+                            });
+                            idleTimer = setTimeout(hideOverlays, 3500);
+                        } else if (doc.defaultView && doc.defaultView.__pfHidePlayerHud) {
+                            setTimeout(doc.defaultView.__pfHidePlayerHud, 3500);
+                        }
+                    } catch (e) {}
+                }
+
+                window.__pfCursorIsOn = ${cursorActive};
+                cleanDoc(document);
+                document.querySelectorAll('iframe').forEach(frame => {
+                    try {
+                        if (frame.contentDocument) {
+                            frame.contentWindow.__pfCursorIsOn = ${cursorActive};
+                            cleanDoc(frame.contentDocument);
+                        }
+                    } catch (e) {}
+                });
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+    }
+
+    private fun notifyCursorStateToPlayer(active: Boolean) {
+        val js = """
+            (function() {
+                window.__pfCursorIsOn = $active;
+                if ($active) {
+                    if (window.__pfClearFocus) window.__pfClearFocus();
+                    if (window.__pfShowPlayerHud) window.__pfShowPlayerHud();
+                }
+                document.querySelectorAll('iframe').forEach(frame => {
+                    try {
+                        if (frame.contentWindow) {
+                            frame.contentWindow.__pfCursorIsOn = $active;
+                            if ($active && frame.contentWindow.__pfShowPlayerHud) {
+                                frame.contentWindow.__pfShowPlayerHud();
+                            }
+                        }
+                    } catch (e) {}
+                });
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -380,11 +630,11 @@ class MainActivity : AppCompatActivity() {
                         if (customView != null) {
                             handler.postDelayed({
                                 setCursorVisibility(false, showToast = false)
-                                releasePlayerControlFocus()
+                                clearHoverAndFocusWithoutClicking()
                             }, 350L)
                         }
                     } else {
-                        performFocusedElementClick()
+                        performSpatialClick()
                     }
                 }
                 return true
@@ -427,31 +677,24 @@ class MainActivity : AppCompatActivity() {
                 }
                 return true
             } else if (customView == null) {
-                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-                    if (action == KeyEvent.ACTION_DOWN) {
-                        val scrollDir = if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) 300 else -300
-                        scrollPage(scrollDir)
+                if (action == KeyEvent.ACTION_DOWN) {
+                    val dir = when (keyCode) {
+                        KeyEvent.KEYCODE_DPAD_UP -> "UP"
+                        KeyEvent.KEYCODE_DPAD_DOWN -> "DOWN"
+                        KeyEvent.KEYCODE_DPAD_LEFT -> "LEFT"
+                        else -> "RIGHT"
                     }
-                    return true
+                    webView.evaluateJavascript("if (window.__pfMoveSpatialFocus) window.__pfMoveSpatialFocus('$dir');", null)
                 }
+                return true
             }
         }
 
         return super.dispatchKeyEvent(event)
     }
 
-    private fun performFocusedElementClick() {
-        val clickJs = """
-            (function() {
-                const el = document.activeElement;
-                if (el && el !== document.body && el !== document.documentElement) {
-                    el.click();
-                    return true;
-                }
-                return false;
-            })();
-        """.trimIndent()
-        webView.evaluateJavascript(clickJs) { result ->
+    private fun performSpatialClick() {
+        webView.evaluateJavascript("if (window.__pfClickFocused) window.__pfClickFocused(); else false;") { result ->
             if (result != "true") {
                 val centerX = webView.width / 2f
                 val centerY = webView.height / 2f
@@ -461,32 +704,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun scrollPage(deltaY: Int) {
-        val scrollJs = """
-            (function() {
-                let scrolled = false;
-                const scrollableElements = document.querySelectorAll('div, main, section, .scrollable, #root');
-                scrollableElements.forEach(el => {
-                    if (el.scrollHeight > el.clientHeight + 50) {
-                        const style = window.getComputedStyle(el);
-                        if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
-                            el.scrollTop += $deltaY;
-                            scrolled = true;
-                        }
-                    }
-                });
-
-                if (!scrolled) {
-                    window.scrollBy({ top: $deltaY, behavior: 'smooth' });
-                }
-            })();
-        """.trimIndent()
-        webView.evaluateJavascript(scrollJs, null)
+        webView.evaluateJavascript("if (window.__pfScrollSmart) window.__pfScrollSmart($deltaY);", null)
     }
 
     private fun setCursorVisibility(active: Boolean, showToast: Boolean = true) {
         ensureCursorAttached()
         val cursor = cursorView ?: return
         cursorActive = active
+        notifyCursorStateToPlayer(active)
         if (cursorActive) {
             cursor.visibility = View.VISIBLE
             updateCursorPosition()
@@ -495,7 +720,7 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             cursor.visibility = View.GONE
-            releasePlayerControlFocus()
+            clearHoverAndFocusWithoutClicking()
             if (showToast) {
                 Toast.makeText(this, "Cursor OFF", Toast.LENGTH_SHORT).show()
             }

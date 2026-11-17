@@ -56,6 +56,16 @@ class MainActivity : AppCompatActivity() {
         toggleCursor()
     }
 
+    // Periodic TCL TV hover-exit pulse so embedded iframe players release center/top controls
+    private val tclHudIdleRunnable = object : Runnable {
+        override fun run() {
+            if (isTvDevice && customView != null && !cursorActive) {
+                releasePlayerControlFocus()
+                handler.postDelayed(this, 2000L)
+            }
+        }
+    }
+
     private val adKeywords = listOf(
         "doubleclick", "googlesyndication", "googleadservices", "adnxs",
         "popads", "popcash", "propellerads", "exoclick", "juicyads",
@@ -90,7 +100,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Prevent Android TV / mobile screen from sleeping or entering screensaver during playback
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         isTvDevice = detectAndroidTv()
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -109,6 +121,8 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.BLACK)
             keepScreenOn = true
             visibility = View.GONE
+            isFocusable = false
+            isFocusableInTouchMode = false
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -149,6 +163,8 @@ class MainActivity : AppCompatActivity() {
                     }
                     customView = view
                     customViewCallback = callback
+                    view?.isFocusable = false
+                    view?.isFocusableInTouchMode = false
                     fullscreenContainer.addView(
                         view,
                         FrameLayout.LayoutParams(
@@ -161,16 +177,20 @@ class MainActivity : AppCompatActivity() {
                     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     hideSystemBars()
 
+                    // Hide cursor automatically upon entering fullscreen so player controls fade out
                     if (cursorActive) {
                         setCursorVisibility(false, showToast = false)
                     }
+                    handler.removeCallbacks(tclHudIdleRunnable)
                     handler.postDelayed({
-                        clearHoverAndFocusWithoutClicking()
+                        releasePlayerControlFocus()
                     }, 350L)
+                    handler.postDelayed(tclHudIdleRunnable, 1500L)
                 }
 
                 override fun onHideCustomView() {
                     if (customView == null) return
+                    handler.removeCallbacks(tclHudIdleRunnable)
                     fullscreenContainer.removeView(customView)
                     fullscreenContainer.visibility = View.GONE
                     customView = null
@@ -207,14 +227,12 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                     super.onPageStarted(view, url, favicon)
-                    injectAdShield(view)
-                    if (isTvDevice) injectTvHelpers(view)
+                    injectGlobalAdAndHudShield(view)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    injectAdShield(view)
-                    if (isTvDevice) injectTvHelpers(view)
+                    injectGlobalAdAndHudShield(view)
                 }
             }
         }
@@ -260,17 +278,25 @@ class MainActivity : AppCompatActivity() {
             isTvDevice = true
             webView.settings.useWideViewPort = false
             ensureCursorAttached()
-            injectTvHelpers(webView)
+            injectGlobalAdAndHudShield(webView)
         } else {
             ensureCursorAttached()
         }
     }
 
-    private fun injectAdShield(view: WebView?) {
-        val adJs = """
+    private fun injectGlobalAdAndHudShield(view: WebView?) {
+        val isTvFlag = isTvDevice
+        val shieldJs = """
             (function() {
-                if (window.__pfAdShieldInstalled) return;
-                window.__pfAdShieldInstalled = true;
+                if (window.__pfGlobalShieldInstalled) return;
+                window.__pfGlobalShieldInstalled = true;
+
+                if ($isTvFlag) {
+                    try {
+                        Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5 });
+                        window.ontouchstart = window.ontouchstart || null;
+                    } catch (e) {}
+                }
 
                 window.open = function() { return null; };
 
@@ -284,6 +310,11 @@ class MainActivity : AppCompatActivity() {
                         display: none !important;
                         visibility: hidden !important;
                         height: 0 !important;
+                        pointer-events: none !important;
+                    }
+                    .__pf-hud-idle-hidden {
+                        opacity: 0 !important;
+                        transition: opacity 0.4s ease !important;
                         pointer-events: none !important;
                     }
                 `;
@@ -300,280 +331,108 @@ class MainActivity : AppCompatActivity() {
                         }
                     });
                 }, 1000);
-            })();
-        """.trimIndent()
-        view?.evaluateJavascript(adJs, null)
-    }
 
-    private fun injectTvHelpers(view: WebView?) {
-        val tvJs = """
-            (function() {
-                if (window.__pfTvHelpersInstalled) return;
-                window.__pfTvHelpersInstalled = true;
+                // TV-only fullscreen HUD auto-fader (hides top bar, bottom bar, and center << || >> buttons)
+                if ($isTvFlag) {
+                    window.__pfCursorActive = false;
 
-                try {
-                    Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 5 });
-                    window.ontouchstart = window.ontouchstart || null;
-                } catch (e) {}
+                    function hideAllPlayerOverlays() {
+                        if (window.__pfCursorActive) return;
+                        const video = document.querySelector('video');
+                        if (!video || video.paused) return;
+                        const isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement ||
+                            video.getBoundingClientRect().width >= window.innerWidth * 0.9);
+                        if (!isFullscreen) return;
 
-                const style = document.createElement('style');
-                style.innerHTML = `
-                    .__pf-tv-focus {
-                        outline: 3px solid #FF6D00 !important;
-                        outline-offset: 3px !important;
-                        box-shadow: 0 0 14px rgba(255, 109, 0, 0.85) !important;
-                        border-radius: 6px !important;
-                        transition: transform 0.12s ease !important;
-                    }
-                    .__pf-hud-idle-hidden {
-                        opacity: 0 !important;
-                        transition: opacity 0.4s ease !important;
-                    }
-                `;
-                (document.head || document.documentElement).appendChild(style);
+                        if (document.activeElement && document.activeElement !== document.body) {
+                            try { document.activeElement.blur(); } catch (e) {}
+                        }
 
-                // Spatial D-pad focus engine for cursor-free remote navigation
-                window.__pfCurrentFocus = null;
+                        document.querySelectorAll('button, [role="button"], input[type="range"]').forEach(btn => {
+                            if (btn === video || btn.contains(video)) return;
+                            const r = btn.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) {
+                                btn.classList.add('__pf-hud-idle-hidden');
+                            }
+                        });
 
-                function getFocusables() {
-                    const selectors = 'a[href], button, input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"]), [onclick]';
-                    const raw = Array.from(document.querySelectorAll(selectors));
-                    return raw.filter(el => {
-                        if (el.disabled || el.getAttribute('aria-hidden') === 'true') return false;
-                        const cs = window.getComputedStyle(el);
-                        if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return false;
-                        const r = el.getBoundingClientRect();
-                        return r.width >= 16 && r.height >= 16;
-                    });
-                }
-
-                window.__pfSetFocus = function(el) {
-                    if (window.__pfCurrentFocus) {
-                        window.__pfCurrentFocus.classList.remove('__pf-tv-focus');
-                    }
-                    window.__pfCurrentFocus = el;
-                    if (el) {
-                        el.classList.add('__pf-tv-focus');
-                        try { el.focus({ preventScroll: true }); } catch (e) {}
-                        el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
-                    }
-                };
-
-                window.__pfClearFocus = function() {
-                    if (window.__pfCurrentFocus) {
-                        window.__pfCurrentFocus.classList.remove('__pf-tv-focus');
-                        window.__pfCurrentFocus = null;
-                    }
-                };
-
-                window.__pfScrollSmart = function(deltaY) {
-                    let scrolled = false;
-                    document.querySelectorAll('div, main, section, .scrollable, #root').forEach(el => {
-                        if (el.scrollHeight > el.clientHeight + 40) {
+                        const vRect = video.getBoundingClientRect();
+                        document.querySelectorAll('div, header, footer, nav, section').forEach(el => {
+                            if (el === video || el.contains(video) || video.contains(el)) return;
                             const cs = window.getComputedStyle(el);
-                            if (cs.overflowY === 'auto' || cs.overflowY === 'scroll') {
-                                const before = el.scrollTop;
-                                el.scrollTop += deltaY;
-                                if (el.scrollTop !== before) scrolled = true;
+                            if (cs.display === 'none' || cs.visibility === 'hidden') return;
+                            const r = el.getBoundingClientRect();
+                            if (r.width < 20 || r.height < 16) return;
+                            const overlapsVideo = r.right > vRect.left && r.left < vRect.right &&
+                                r.bottom > vRect.top && r.top < vRect.bottom;
+                            if (overlapsVideo && (cs.position === 'absolute' || cs.position === 'fixed' || el.querySelector('button, svg'))) {
+                                el.classList.add('__pf-hud-idle-hidden');
+                            }
+                        });
+                    }
+
+                    function showAllPlayerOverlays() {
+                        document.querySelectorAll('.__pf-hud-idle-hidden').forEach(el => {
+                            el.classList.remove('__pf-hud-idle-hidden');
+                        });
+                    }
+
+                    window.__pfHidePlayerHudNow = hideAllPlayerOverlays;
+                    window.__pfShowPlayerHudNow = showAllPlayerOverlays;
+
+                    setInterval(() => {
+                        if (!window.__pfCursorActive) {
+                            hideAllPlayerOverlays();
+                        }
+                    }, 1200);
+
+                    window.addEventListener('message', (ev) => {
+                        if (ev.data && ev.data.type === '__PF_CURSOR_STATE') {
+                            window.__pfCursorActive = !!ev.data.active;
+                            if (window.__pfCursorActive) {
+                                showAllPlayerOverlays();
+                            } else {
+                                setTimeout(hideAllPlayerOverlays, 1200);
                             }
                         }
                     });
-                    if (!scrolled) {
-                        window.scrollBy({ top: deltaY, behavior: 'smooth' });
-                    }
-                };
-
-                window.__pfMoveSpatialFocus = function(dir) {
-                    const list = getFocusables();
-                    if (!list.length) {
-                        if (dir === 'DOWN') window.__pfScrollSmart(320);
-                        if (dir === 'UP') window.__pfScrollSmart(-320);
-                        return;
-                    }
-
-                    let curr = window.__pfCurrentFocus;
-                    if (!curr || !document.body.contains(curr)) {
-                        const visible = list.find(el => {
-                            const r = el.getBoundingClientRect();
-                            return r.top >= 0 && r.bottom <= window.innerHeight;
-                        }) || list[0];
-                        window.__pfSetFocus(visible);
-                        return;
-                    }
-
-                    const cRect = curr.getBoundingClientRect();
-                    const cx = cRect.left + cRect.width / 2;
-                    const cy = cRect.top + cRect.height / 2;
-
-                    let best = null;
-                    let bestScore = Infinity;
-
-                    for (const el of list) {
-                        if (el === curr) continue;
-                        const r = el.getBoundingClientRect();
-                        const ex = r.left + r.width / 2;
-                        const ey = r.top + r.height / 2;
-                        const dx = ex - cx;
-                        const dy = ey - cy;
-
-                        let valid = false;
-                        let primary = 0;
-                        let secondary = 0;
-
-                        if (dir === 'RIGHT' && dx > 10 && Math.abs(dy) < Math.max(cRect.height * 1.4, 90)) {
-                            valid = true; primary = dx; secondary = Math.abs(dy) * 2.5;
-                        } else if (dir === 'LEFT' && dx < -10 && Math.abs(dy) < Math.max(cRect.height * 1.4, 90)) {
-                            valid = true; primary = -dx; secondary = Math.abs(dy) * 2.5;
-                        } else if (dir === 'DOWN' && dy > 10) {
-                            valid = true; primary = dy; secondary = Math.abs(dx) * 1.5;
-                        } else if (dir === 'UP' && dy < -10) {
-                            valid = true; primary = -dy; secondary = Math.abs(dx) * 1.5;
-                        }
-
-                        if (valid) {
-                            const score = primary + secondary;
-                            if (score < bestScore) {
-                                bestScore = score;
-                                best = el;
-                            }
-                        }
-                    }
-
-                    if (best) {
-                        window.__pfSetFocus(best);
-                    } else if (dir === 'DOWN') {
-                        window.__pfScrollSmart(350);
-                    } else if (dir === 'UP') {
-                        window.__pfScrollSmart(-350);
-                    }
-                };
-
-                window.__pfClickFocused = function() {
-                    const el = window.__pfCurrentFocus || document.activeElement;
-                    if (el && el !== document.body && el !== document.documentElement) {
-                        el.click();
-                        return true;
-                    }
-                    return false;
-                };
+                }
             })();
         """.trimIndent()
-        view?.evaluateJavascript(tvJs, null)
+        view?.evaluateJavascript(shieldJs, null)
     }
 
-    private fun clearHoverAndFocusWithoutClicking() {
-        val targetView: View = if (fullscreenContainer.visibility == View.VISIBLE) fullscreenContainer else webView
+    private fun releasePlayerControlFocus() {
         val now = SystemClock.uptimeMillis()
-
-        val hoverExit = MotionEvent.obtain(now, now, MotionEvent.ACTION_HOVER_EXIT, 0f, 0f, 0).apply {
-            source = InputDevice.SOURCE_MOUSE
+        // Send ACTION_HOVER_EXIT to both fullscreenContainer and webView so TCL TV clears pointer hover inside iframes
+        listOfNotNull(customView, fullscreenContainer, webView).forEach { target ->
+            val hoverExit = MotionEvent.obtain(now, now, MotionEvent.ACTION_HOVER_EXIT, -1f, -1f, 0).apply {
+                source = InputDevice.SOURCE_MOUSE
+            }
+            target.dispatchGenericMotionEvent(hoverExit)
+            hoverExit.recycle()
         }
-        targetView.dispatchGenericMotionEvent(hoverExit)
-        hoverExit.recycle()
 
-        val js = """
+        val activeFlag = cursorActive
+        val blurJs = """
             (function() {
-                if (window.__pfClearFocus) window.__pfClearFocus();
-                function cleanDoc(doc) {
-                    try {
-                        if (doc.activeElement && doc.activeElement !== doc.body) {
-                            doc.activeElement.blur();
-                        }
-                        doc.querySelectorAll('button, [tabindex], a, input').forEach(el => {
-                            try { el.blur(); } catch (e) {}
-                        });
-                        doc.querySelectorAll('video, [class*="player"], [class*="control"], [class*="overlay"], [id*="player"]').forEach(el => {
-                            ['mouseleave', 'mouseout', 'pointerleave', 'pointerout'].forEach(evt => {
-                                el.dispatchEvent(new MouseEvent(evt, { bubbles: true }));
-                                if (window.PointerEvent) {
-                                    el.dispatchEvent(new PointerEvent(evt, { bubbles: true }));
-                                }
-                            });
-                        });
-
-                        const video = doc.querySelector('video');
-                        if (video && !doc.__pfIdleWatcherInstalled) {
-                            doc.__pfIdleWatcherInstalled = true;
-                            let idleTimer = null;
-
-                            const hideOverlays = () => {
-                                if (video.paused || window.__pfCursorIsOn) return;
-                                const vRect = video.getBoundingClientRect();
-                                if (vRect.width < 300) return;
-                                doc.querySelectorAll('div, header, footer, nav').forEach(el => {
-                                    if (el === video || el.contains(video)) return;
-                                    const cs = window.getComputedStyle(el);
-                                    const r = el.getBoundingClientRect();
-                                    const isOverlay = (cs.position === 'absolute' || cs.position === 'fixed') &&
-                                        r.width > vRect.width * 0.5 && r.height > 24 && r.height < vRect.height * 0.45;
-                                    if (isOverlay) {
-                                        el.classList.add('__pf-hud-idle-hidden');
-                                    }
-                                });
-                            };
-
-                            const showOverlays = () => {
-                                doc.querySelectorAll('.__pf-hud-idle-hidden').forEach(el => {
-                                    el.classList.remove('__pf-hud-idle-hidden');
-                                });
-                                clearTimeout(idleTimer);
-                                idleTimer = setTimeout(hideOverlays, 3500);
-                            };
-
-                            window.__pfShowPlayerHud = showOverlays;
-                            window.__pfHidePlayerHud = hideOverlays;
-
-                            ['pointerdown', 'keydown', 'touchstart'].forEach(ev => {
-                                doc.addEventListener(ev, showOverlays, true);
-                            });
-                            video.addEventListener('pause', showOverlays);
-                            video.addEventListener('play', () => {
-                                clearTimeout(idleTimer);
-                                idleTimer = setTimeout(hideOverlays, 3500);
-                            });
-                            idleTimer = setTimeout(hideOverlays, 3500);
-                        } else if (doc.defaultView && doc.defaultView.__pfHidePlayerHud) {
-                            setTimeout(doc.defaultView.__pfHidePlayerHud, 3500);
-                        }
-                    } catch (e) {}
+                window.__pfCursorActive = $activeFlag;
+                if (document.activeElement && document.activeElement !== document.body) {
+                    try { document.activeElement.blur(); } catch (e) {}
                 }
-
-                window.__pfCursorIsOn = ${cursorActive};
-                cleanDoc(document);
-                document.querySelectorAll('iframe').forEach(frame => {
+                if ($activeFlag) {
+                    if (window.__pfShowPlayerHudNow) window.__pfShowPlayerHudNow();
+                } else {
+                    if (window.__pfHidePlayerHudNow) window.__pfHidePlayerHudNow();
+                }
+                document.querySelectorAll('iframe').forEach(f => {
                     try {
-                        if (frame.contentDocument) {
-                            frame.contentWindow.__pfCursorIsOn = ${cursorActive};
-                            cleanDoc(frame.contentDocument);
-                        }
+                        f.contentWindow.postMessage({ type: '__PF_CURSOR_STATE', active: $activeFlag }, '*');
                     } catch (e) {}
                 });
             })();
         """.trimIndent()
-        webView.evaluateJavascript(js, null)
-    }
-
-    private fun notifyCursorStateToPlayer(active: Boolean) {
-        val js = """
-            (function() {
-                window.__pfCursorIsOn = $active;
-                if ($active) {
-                    if (window.__pfClearFocus) window.__pfClearFocus();
-                    if (window.__pfShowPlayerHud) window.__pfShowPlayerHud();
-                }
-                document.querySelectorAll('iframe').forEach(frame => {
-                    try {
-                        if (frame.contentWindow) {
-                            frame.contentWindow.__pfCursorIsOn = $active;
-                            if ($active && frame.contentWindow.__pfShowPlayerHud) {
-                                frame.contentWindow.__pfShowPlayerHud();
-                            }
-                        }
-                    } catch (e) {}
-                });
-            })();
-        """.trimIndent()
-        webView.evaluateJavascript(js, null)
+        webView.evaluateJavascript(blurJs, null)
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -630,11 +489,11 @@ class MainActivity : AppCompatActivity() {
                         if (customView != null) {
                             handler.postDelayed({
                                 setCursorVisibility(false, showToast = false)
-                                clearHoverAndFocusWithoutClicking()
+                                releasePlayerControlFocus()
                             }, 350L)
                         }
                     } else {
-                        performSpatialClick()
+                        performFocusedElementClick()
                     }
                 }
                 return true
@@ -677,24 +536,31 @@ class MainActivity : AppCompatActivity() {
                 }
                 return true
             } else if (customView == null) {
-                if (action == KeyEvent.ACTION_DOWN) {
-                    val dir = when (keyCode) {
-                        KeyEvent.KEYCODE_DPAD_UP -> "UP"
-                        KeyEvent.KEYCODE_DPAD_DOWN -> "DOWN"
-                        KeyEvent.KEYCODE_DPAD_LEFT -> "LEFT"
-                        else -> "RIGHT"
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                    if (action == KeyEvent.ACTION_DOWN) {
+                        val scrollDir = if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) 300 else -300
+                        scrollPage(scrollDir)
                     }
-                    webView.evaluateJavascript("if (window.__pfMoveSpatialFocus) window.__pfMoveSpatialFocus('$dir');", null)
+                    return true
                 }
-                return true
             }
         }
 
         return super.dispatchKeyEvent(event)
     }
 
-    private fun performSpatialClick() {
-        webView.evaluateJavascript("if (window.__pfClickFocused) window.__pfClickFocused(); else false;") { result ->
+    private fun performFocusedElementClick() {
+        val clickJs = """
+            (function() {
+                const el = document.activeElement;
+                if (el && el !== document.body && el !== document.documentElement) {
+                    el.click();
+                    return true;
+                }
+                return false;
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(clickJs) { result ->
             if (result != "true") {
                 val centerX = webView.width / 2f
                 val centerY = webView.height / 2f
@@ -704,23 +570,47 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun scrollPage(deltaY: Int) {
-        webView.evaluateJavascript("if (window.__pfScrollSmart) window.__pfScrollSmart($deltaY);", null)
+        val scrollJs = """
+            (function() {
+                let scrolled = false;
+                const scrollableElements = document.querySelectorAll('div, main, section, .scrollable, #root');
+                scrollableElements.forEach(el => {
+                    if (el.scrollHeight > el.clientHeight + 50) {
+                        const style = window.getComputedStyle(el);
+                        if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
+                            el.scrollTop += $deltaY;
+                            scrolled = true;
+                        }
+                    }
+                });
+
+                if (!scrolled) {
+                    window.scrollBy({ top: $deltaY, behavior: 'smooth' });
+                }
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(scrollJs, null)
     }
 
     private fun setCursorVisibility(active: Boolean, showToast: Boolean = true) {
         ensureCursorAttached()
         val cursor = cursorView ?: return
         cursorActive = active
-        notifyCursorStateToPlayer(active)
         if (cursorActive) {
+            handler.removeCallbacks(tclHudIdleRunnable)
             cursor.visibility = View.VISIBLE
             updateCursorPosition()
+            releasePlayerControlFocus()
             if (showToast) {
                 Toast.makeText(this, "Cursor ON (OK to click, Back to exit)", Toast.LENGTH_SHORT).show()
             }
         } else {
             cursor.visibility = View.GONE
-            clearHoverAndFocusWithoutClicking()
+            releasePlayerControlFocus()
+            if (customView != null) {
+                handler.removeCallbacks(tclHudIdleRunnable)
+                handler.postDelayed(tclHudIdleRunnable, 1500L)
+            }
             if (showToast) {
                 Toast.makeText(this, "Cursor OFF", Toast.LENGTH_SHORT).show()
             }
